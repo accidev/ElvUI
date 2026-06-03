@@ -124,11 +124,17 @@ do
 					plate:UpdateTags()
 				end
 
-				-- re-pin 1px border when engine rescale changes effectiveScale
-				local bdf = h and h.backdrop
-				if bdf and bdf._npPinnedScale ~= bdf:GetEffectiveScale() then
-					NP:Health_FixBorderPixel(h)
+				-- re-pin 1px borders when engine rescale changes effectiveScale
+				local function CheckFix(el)
+					if el and el.backdrop and el.backdrop._npPinnedScale ~= el:GetEffectiveScale() then
+						NP:FixBorderPixel(el)
+					end
 				end
+				CheckFix(h)
+				CheckFix(plate.Power)
+				CheckFix(plate.Castbar)
+				CheckFix(plate.ClassPower)
+				CheckFix(plate.Portrait)
 
 				if not plate.appliedFrameLevelBoost then
 					-- cache engine parent once; only GetFrameLevel + dirty-check run per tick
@@ -683,7 +689,7 @@ function NP:NamePlateCallBack(nameplate, event, unit)
 			baseFrame.UnitFrame:Hide()
 		end
 
-		if UnitIsUnit(unit, 'player') and NamePlateDriverFrame then
+		if UnitIsUnit(unit, 'player') and NamePlateDriverFrame and NamePlateDriverFrame.GetClassNameplateManaBar then
 			local manaBar = NamePlateDriverFrame:GetClassNameplateManaBar()
 			if manaBar and not manaBar._elvHooked then
 				manaBar:HookScript('OnShow', function(self) self:Hide() end)
@@ -879,7 +885,13 @@ function NP:ScalePlate(nameplate, scale)
 		scale = scale * NP.db.targetScale
 	end
 	nameplate:SetScale(scale * (E.uiscale or 1))
-	if nameplate.Health then NP:Health_FixBorderPixel(nameplate.Health) end
+
+	-- Re-pin 1px borders on all elements with backdrops
+	if nameplate.Health then NP:FixBorderPixel(nameplate.Health) end
+	if nameplate.Power then NP:FixBorderPixel(nameplate.Power) end
+	if nameplate.Castbar then NP:FixBorderPixel(nameplate.Castbar) end
+	if nameplate.ClassPower then NP:FixBorderPixel(nameplate.ClassPower) end
+	if nameplate.Portrait then NP:FixBorderPixel(nameplate.Portrait) end
 end
 
 function NP:SetFrameScale(frame, scale)
@@ -963,6 +975,12 @@ function NP:Initialize()
 	self.db = E.db.nameplates
 
 	if not E.private.nameplates.enable then return end
+
+	if not (NamePlateDriverFrame and C_NamePlate and C_NamePlate.GetNamePlateForUnit) then
+		E:Print('нейплейты отключены: в клиенте сломан API C_NamePlate.')
+		return
+	end
+
 	self.Initialized = true
 
 	NP.thinBorders = NP.db.thinBorders
