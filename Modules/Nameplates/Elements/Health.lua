@@ -14,7 +14,8 @@ local UnitReaction = UnitReaction
 local UnitIsConnected = UnitIsConnected
 local CreateFrame = CreateFrame
 
--- 1 physical px in logical units = factor/effectiveScale (PixelUtil factor is taint-safe; falls back to 768/screenheight).
+-- Calculate 1 physical pixel in logical units for a given effective scale.
+-- Uses PixelUtil when available (taint-safe), falls back to 768/screenheight ratio.
 function NP:BorderPixelSize(effectiveScale)
 	local factor = (PixelUtil and PixelUtil.GetPixelToUIUnitFactor and PixelUtil.GetPixelToUIUnitFactor())
 	if not factor or factor <= 0 then
@@ -27,13 +28,22 @@ function NP:BorderPixelSize(effectiveScale)
 	return factor / s
 end
 
-function NP:Health_FixBorderPixel(Health)
-	local backdrop = Health and Health.backdrop
+-- Re-pin any element's backdrop border to exactly 1 physical pixel,
+-- accounting for the nameplate's current effective scale.
+-- Must be called whenever the nameplate scale changes (e.g. via ScalePlate).
+-- Works for any frame that has a .backdrop created via CreateBackdrop.
+function NP:FixBorderPixel(frame)
+	local backdrop = frame and frame.backdrop
 	if not backdrop or not backdrop.GetBackdrop then return end
-	local eff = backdrop:GetEffectiveScale()
+
+	-- Use the frame's own effective scale (inherits nameplate scale)
+	local eff = frame:GetEffectiveScale()
 	local px = NP:BorderPixelSize(eff)
+
 	local bd = backdrop:GetBackdrop()
 	if not bd then return end
+
+	-- Only update if the pixel size actually changed
 	if bd.edgeSize ~= px then
 		local cr, cg, cb, ca = backdrop:GetBackdropColor()
 		bd.edgeSize = px
@@ -45,10 +55,19 @@ function NP:Health_FixBorderPixel(Health)
 			backdrop:SetBackdropBorderColor(unpack(E.media.unitframeBorderColor))
 		end
 	end
-	backdrop:SetOutside(Health, px, px)
+
+	-- Reposition the backdrop snug around the frame using raw SetPoint
+	-- (bypass E:Point scaling since px is already in logical units)
+	backdrop:ClearAllPoints()
+	backdrop:SetPoint("TOPLEFT", frame, "TOPLEFT", -px, px)
+	backdrop:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", px, -px)
+
 	backdrop.ignoreFrameTemplates = true
 	backdrop._npPinnedScale = eff
 end
+
+-- Backward-compatible alias
+NP.Health_FixBorderPixel = NP.FixBorderPixel
 
 function NP:Health_SyncBorderLevel(Health)
 	local backdrop = Health and Health.backdrop
@@ -169,13 +188,36 @@ function NP:Health_IsVisible(nameplate)
 	return not Health._isTransparent
 end
 
+-- Keep the status bar texture anchored to the right edge when width changes,
+-- so the filled portion always starts from the left and the empty space is on the right.
+local function HealthBar_OnSizeChanged(self, width)
+	local health = self:GetValue()
+	local _, maxHealth = self:GetMinMaxValues()
+	if maxHealth and maxHealth > 0 then
+		local tex = self:GetStatusBarTexture()
+		if tex then
+			tex:SetPoint('TOPRIGHT', -(width * ((maxHealth - health) / maxHealth)), 0)
+		end
+	end
+end
+
 function NP:Construct_Health(nameplate)
 	local Health = CreateFrame('StatusBar', nameplate:GetName()..'Health', nameplate)
 	do local s = nameplate:GetFrameStrata() if s ~= 'UNKNOWN' then Health:SetFrameStrata(s) else Health:SetFrameStrata('MEDIUM') end end
 	Health:SetFrameLevel(nameplate:GetFrameLevel() + 1)
 	Health:CreateBackdrop('Transparent', nil, nil, nil, nil, true, true)
-	NP:Health_FixBorderPixel(Health)
+	NP:FixBorderPixel(Health)
 	NP:Health_SyncBorderLevel(Health)
+
+	-- Keep the backdrop from being overwritten by global template updates
+	Health.backdrop.ignoreFrameTemplates = true
+
+	-- Re-pin border pixel when the statusbar texture is re-assigned (e.g. after style change)
+	hooksecurefunc(Health, 'SetStatusBarTexture', function()
+		NP:FixBorderPixel(Health)
+	end)
+
+	Health:SetScript('OnSizeChanged', HealthBar_OnSizeChanged)
 
 	local textFrame = CreateFrame('Frame', nil, Health)
 	textFrame:SetAllPoints(Health)
