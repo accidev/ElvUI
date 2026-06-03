@@ -2,359 +2,141 @@ local E, L, V, P, G = unpack(select(2, ...))
 local NP = E:GetModule('NamePlates')
 local LSM = E.Libs.LSM
 
-local max, pairs = max, pairs
-local huge = math.huge
-
+local ipairs = ipairs
+local tinsert = tinsert
+local UnitPlayerControlled = UnitPlayerControlled
+local UnitIsTapped = UnitIsTapped
+local UnitClass = UnitClass
 local CreateFrame = CreateFrame
-local GetComboPoints = GetComboPoints
-local GetRuneCooldown = GetRuneCooldown
-local GetRuneType = GetRuneType
-local GetTime = GetTime
-local InCombatLockdown = InCombatLockdown
-local UnitHasVehicleUI = UnitHasVehicleUI
-local MAX_COMBO_POINTS = MAX_COMBO_POINTS
+local UnitPowerType = UnitPowerType
 
-local COMBO_CLASS = { ROGUE = true, DRUID = true }
-local RUNE_CLASS  = 'DEATHKNIGHT'
+function NP:Power_UpdateColor(_, unit)
+	if self.unit ~= unit then return end
 
-local MAX_POINTS = {
-	DEATHKNIGHT = 6,
-	ROGUE       = max(5, MAX_COMBO_POINTS),
-	DRUID       = max(5, MAX_COMBO_POINTS),
-}
+	local element = self.Power
+	local ptype, ptoken = UnitPowerType(unit)
+	element.token = ptoken
 
-function NP:ClassPower_UpdateRuneFrameVisibility()
-	local playerDB = NP.db.units.PLAYER and NP.db.units.PLAYER.classpower
-	local targetDB = NP.db.units.TARGET and NP.db.units.TARGET.classpower
-	local enabled  = (playerDB and playerDB.enable) or (targetDB and targetDB.enable)
-
-	if E.myclass == RUNE_CLASS then
-		local rf = _G.RuneFrame
-		if rf then
-			if enabled then
-				rf:Hide()
-				rf.Show = E.noop
-			else
-				rf.Show = nil
-				rf:Show()
-			end
-		end
+	local r, g, b, t
+	if element.colorTapping and not UnitPlayerControlled(unit) and UnitIsTapped(unit) then
+		t = self.colors.tapped
+	elseif element.colorPower then
+		t = NP.db.colors.power and NP.db.colors.power[ptoken or ptype]
+	elseif (element.colorClass and self.isPlayer) then
+		local _, class = UnitClass(unit)
+		t = self.colors.class[class]
 	end
 
-	if COMBO_CLASS[E.myclass] or E.myclass == RUNE_CLASS then
-		local driver = _G.NamePlateDriverFrame
-		local bar    = driver and driver:GetClassNameplateBar()
-		if bar then
-			if enabled then
-				bar:Hide()
-			elseif driver then
-				driver:SetupClassNameplateBars()
-			end
+	if t then
+		r, g, b = t[1] or t.r, t[2] or t.g, t[3] or t.b
+	end
+
+	if b then
+		element:SetStatusBarColor(r, g, b)
+	end
+
+	if element.bg and b then
+		element.bg:SetVertexColor(r * NP.multiplier, g * NP.multiplier, b * NP.multiplier)
+	end
+
+	if element.PostUpdateColor then
+		element:PostUpdateColor(unit, r, g, b)
+	end
+
+	local frame = self
+	if frame.PowerColorChangeCallbacks and b then
+		for _, cb in ipairs(frame.PowerColorChangeCallbacks) do
+			cb(NP, frame, r, g, b)
 		end
 	end
 end
 
-function NP:ClassPower_HookBlizzardBars()
-	if not (COMBO_CLASS[E.myclass] or E.myclass == RUNE_CLASS) then return end
-	local driver = _G.NamePlateDriverFrame
-	if not driver or driver._elvClassPowerHooked then return end
-	driver._elvClassPowerHooked = true
+function NP:Power_PostUpdate(unit, cur, max)
+	local frame = self.__owner
+	local db = NP:PlateDB(frame)
+	if not db.enable then return end
 
-	hooksecurefunc(driver, 'SetupClassNameplateBars', function()
-		local pDB = NP.db and NP.db.units.PLAYER and NP.db.units.PLAYER.classpower
-		local tDB = NP.db and NP.db.units.TARGET and NP.db.units.TARGET.classpower
-		if not ((pDB and pDB.enable) or (tDB and tDB.enable)) then return end
-		local bar = driver.classNamePlateMechanicFrame
-		if bar then bar:Hide() end
+	if db.power and db.power.enable and db.power.hideWhenEmpty and (cur == 0) then
+		self:Hide()
+	else
+		self:Show()
+	end
+
+	if frame.PowerValueChangeCallbacks then
+		for _, cb in ipairs(frame.PowerValueChangeCallbacks) do
+			cb(NP, frame, cur or 0, max or 0)
+		end
+	end
+end
+
+function NP:RegisterPowerBarCallbacks(frame, valueChangeCB, colorChangeCB)
+	if valueChangeCB then
+		frame.PowerValueChangeCallbacks = frame.PowerValueChangeCallbacks or {}
+		tinsert(frame.PowerValueChangeCallbacks, valueChangeCB)
+	end
+
+	if colorChangeCB then
+		frame.PowerColorChangeCallbacks = frame.PowerColorChangeCallbacks or {}
+		tinsert(frame.PowerColorChangeCallbacks, colorChangeCB)
+	end
+end
+
+function NP:Construct_Power(nameplate)
+	local Power = CreateFrame('StatusBar', nameplate:GetName()..'Power', nameplate)
+	do local s = nameplate:GetFrameStrata() if s ~= 'UNKNOWN' then Power:SetFrameStrata(s) else Power:SetFrameStrata('MEDIUM') end end
+	Power:SetFrameLevel(nameplate:GetFrameLevel() + 1)
+	Power:CreateBackdrop('Transparent', nil, nil, nil, nil, true, true)
+	NP:FixBorderPixel(Power)
+	Power.backdrop.ignoreFrameTemplates = true
+
+	hooksecurefunc(Power, 'SetStatusBarTexture', function()
+		NP:FixBorderPixel(Power)
 	end)
+
+	NP.StatusBars[Power] = true
+
+	local bg = Power:CreateTexture(nameplate:GetName()..'PowerBG', 'BORDER')
+	bg:SetAllPoints(Power)
+	bg:SetTexture(LSM:Fetch('statusbar', NP.db.statusbar))
+	bg:SetVertexColor(0, 0, 0, 1)
+	Power.bg = bg
+
+	Power.frequentUpdates = false -- UNIT_POWER events suffice; avoids a per-frame OnUpdate
+	Power.colorTapping = false
+	Power.colorClass = false
+	Power.colorPower = true
+
+	Power.PostUpdate = NP.Power_PostUpdate
+	Power.UpdateColor = NP.Power_UpdateColor
+
+	return Power
 end
 
--- Rune slot -> display position map (matches oUF runes.lua).
-local runemap = {1, 2, 5, 6, 3, 4}
+function NP:Update_Power(nameplate)
+	local db = NP:PlateDB(nameplate)
 
-local RUNE_STEP = 0.05
-local function RuneOnUpdate(self, elapsed)
-	self.duration = self.duration + elapsed
-	if self.duration >= (self._np_dur or huge) then
-		self:SetMinMaxValues(0, 1)
-		self:SetValue(1)
-		self._lastApplied = nil
-		self:SetScript('OnUpdate', nil)
-		return
-	end
-	if (self.duration - (self._lastApplied or -1)) >= RUNE_STEP then
-		self._lastApplied = self.duration
-		self:SetValue(self.duration)
-	end
-end
-
-function NP:ClassPower_SetBarColor(bar, r, g, b)
-	bar:SetStatusBarColor(r, g, b)
-	if bar.bg then
-		bar.bg:SetVertexColor(r * NP.multiplier, g * NP.multiplier, b * NP.multiplier)
-	end
-end
-
-function NP:ClassPower_UpdateColor(frame, powerType)
-	local colors     = NP.db.colors.classResources
-	local classColor = (powerType == 'COMBO_POINTS') and colors.comboPoints
-	for i = 1, #frame do
-		local bar = frame[i]
-		if bar then
-			local color = classColor and classColor[i]
-			if color then NP:ClassPower_SetBarColor(bar, color.r, color.g, color.b) end
-		end
-	end
-end
-
-function NP:ClassPower_UpdateComboPoints(nameplate)
-	local frame = nameplate.ClassPower
-	if not frame then return end
-
-	local cp
-	if UnitHasVehicleUI('player') then
-		cp = GetComboPoints('vehicle', 'target') or 0
-	else
-		cp = GetComboPoints('player', 'target') or 0
-	end
-
-	for i = 1, MAX_COMBO_POINTS do
-		local bar = frame[i]
-		if bar then
-			if i <= cp then
-				bar:Show()
-				bar.bg:Show()
-			else
-				bar:Hide()
-				bar.bg:Hide()
-			end
-		end
-	end
-
-	if cp > 0 then
-		frame:Show()
-		NP:ClassPower_UpdateColor(frame, 'COMBO_POINTS')
-	else
-		frame:Hide()
-	end
-end
-
-function NP:ClassPower_UpdateRune(nameplate, runeID)
-	local frame = nameplate.ClassPower
-	if not frame then return end
-
-	local rune = frame[runemap[runeID]]
-	if not rune then return end
-
-	local runeType = GetRuneType(runeID)
-	if runeType then
-		rune.runeType = runeType
-		local colors = NP.db.colors.classResources
-		local color  = colors.DEATHKNIGHT and colors.DEATHKNIGHT[runeType]
-		if color then NP:ClassPower_SetBarColor(rune, color.r, color.g, color.b) end
-	end
-
-	if UnitHasVehicleUI('player') then
-		rune:Hide()
-		return
-	end
-
-	local start, duration, runeReady = GetRuneCooldown(runeID)
-	if not start then return end
-
-	if runeReady then
-		rune:SetMinMaxValues(0, 1)
-		rune:SetValue(1)
-		rune._lastApplied = nil
-		rune:SetScript('OnUpdate', nil)
-	else
-		rune.duration = GetTime() - start
-		rune._lastApplied = nil
-		rune._np_dur = duration
-		rune:SetMinMaxValues(0, duration)
-		rune:SetValue(0)
-		rune:SetScript('OnUpdate', RuneOnUpdate)
-	end
-	rune:Show()
-end
-
-function NP:ClassPower_UpdateAllRunes(nameplate)
-	if not nameplate.ClassPower then return end
-	for i = 1, 6 do
-		NP:ClassPower_UpdateRune(nameplate, i)
-	end
-	nameplate.ClassPower:Show()
-end
-
-function NP:Construct_ClassPower(nameplate)
-	local frameName  = nameplate:GetName()
-	local ClassPower = CreateFrame('Frame', frameName..'ClassPower', nameplate)
-	ClassPower:CreateBackdrop('Transparent', nil, nil, nil, nil, true, true)
-	NP:FixBorderPixel(ClassPower)
-	ClassPower.backdrop.ignoreFrameTemplates = true
-	ClassPower:Hide()
-	do local s = nameplate:GetFrameStrata() if s ~= 'UNKNOWN' then ClassPower:SetFrameStrata(s) else ClassPower:SetFrameStrata('MEDIUM') end end
-	ClassPower:SetFrameLevel(nameplate:GetFrameLevel() + 2)
-
-	local texture = LSM:Fetch('statusbar', NP.db.statusbar)
-	local total   = MAX_POINTS[E.myclass] or 0
-
-	for i = 1, total do
-		local bar = CreateFrame('StatusBar', frameName..'ClassPower'..i, ClassPower)
-		bar:SetStatusBarTexture(texture)
-		do local s = nameplate:GetFrameStrata() if s ~= 'UNKNOWN' then bar:SetFrameStrata(s) else bar:SetFrameStrata('MEDIUM') end end
-		bar:SetFrameLevel(nameplate:GetFrameLevel() + 3)
-		NP.StatusBars[bar] = true
-
-		bar.bg = ClassPower:CreateTexture(frameName..'ClassPower'..i..'bg', 'BORDER')
-		bar.bg:SetTexture(texture)
-		bar.bg:SetAllPoints(bar)
-
-		if E.myclass == RUNE_CLASS then
-			bar:SetMinMaxValues(0, 1)
-			bar:SetValue(1)
+	if db.power and db.power.enable and not db.nameOnly then
+		if not nameplate:IsElementEnabled('Power') then
+			nameplate:EnableElement('Power')
 		end
 
-		ClassPower[i] = bar
+		nameplate.Power:SetStatusBarTexture(LSM:Fetch('statusbar', NP.db.statusbar))
+		nameplate.Power:Point('CENTER', nameplate, 'CENTER', db.power.xOffset or 0, db.power.yOffset or 0)
+
+		E:SetSmoothing(nameplate.Power, NP.db.smoothbars)
+	elseif nameplate:IsElementEnabled('Power') then
+		nameplate:DisableElement('Power')
 	end
 
-	if nameplate == _G.ElvNP_Test then
-		ClassPower.Hide = ClassPower.Show
-		ClassPower:Show()
+	nameplate.Power.colorClass = db.power and db.power.classColor
+	nameplate.Power.colorPower = not (db.power and db.power.classColor)
+	nameplate.Power.width = db.power and db.power.width
+	nameplate.Power.height = db.power and db.power.height
+	if db.power then
+		nameplate.Power:Size(db.power.width, db.power.height)
 	end
 
-	return ClassPower
-end
-
-local function LayoutClassPowerBars(frame, db, maxButtons)
-	frame:ClearAllPoints()
-	frame:Point('CENTER', frame:GetParent(), 'CENTER', db.xOffset, db.yOffset)
-	frame:Size(db.width, db.height)
-
-	for i = 1, #frame do
-		frame[i]:Hide()
-		frame[i].bg:Hide()
-	end
-
-	if maxButtons > 0 then
-		local barW = db.width / maxButtons
-		for i = 1, maxButtons do
-			local btn = frame[i]
-			btn:ClearAllPoints()
-			if i == 1 then
-				btn:Point('LEFT', frame, 'LEFT', 0, 0)
-				btn:Size(barW, db.height)
-			else
-				btn:Point('LEFT', frame[i - 1], 'RIGHT', 1, 0)
-				btn:Size(barW - 1, db.height)
-				if i == maxButtons then
-					btn:Point('RIGHT', frame)
-				end
-			end
-		end
-	end
-end
-
-function NP:Update_ClassPower(nameplate)
-	local frame = nameplate.ClassPower
-	if not frame then return end
-
-	if nameplate == _G.ElvNP_Test then
-		local db = NP:PlateDB(nameplate)
-		if not db.nameOnly and db.classpower and db.classpower.enable then
-			local fixedCount = 5
-			if fixedCount > #frame then fixedCount = #frame end
-			LayoutClassPowerBars(frame, db.classpower, fixedCount)
-			for i = 1, fixedCount do
-				local bar = frame[i]
-				if bar then
-					bar:Show()
-					if bar.bg then bar.bg:Show() end
-				end
-			end
-			NP:ClassPower_UpdateColor(frame, 'COMBO_POINTS')
-			frame:SetAlpha(1)
-		else
-			frame:SetAlpha(0)
-		end
-		return
-	end
-
-	if not COMBO_CLASS[E.myclass] and E.myclass ~= RUNE_CLASS then
-		frame:Hide()
-		return
-	end
-
-	local plateDB = NP:PlateDB(nameplate)
-	if plateDB.nameOnly then
-		frame:Hide()
-		return
-	end
-
-	local isPlayer = nameplate.frameType == 'PLAYER'
-	local isTarget = nameplate.isTarget
-
-	local db = isPlayer and (NP.db.units.PLAYER and NP.db.units.PLAYER.classpower)
-		or (isTarget and (NP.db.units.TARGET and NP.db.units.TARGET.classpower))
-	if not db then
-		frame:Hide()
-		return
-	end
-
-	if not db.enable then
-		frame:Hide()
-		return
-	end
-	if db.onlyInCombat and not InCombatLockdown() then
-		frame:Hide()
-		return
-	end
-
-	local isRuneMode = E.myclass == RUNE_CLASS
-	local maxButtons = isRuneMode and 6 or MAX_COMBO_POINTS
-	if maxButtons > #frame then maxButtons = #frame end
-
-	LayoutClassPowerBars(frame, db, maxButtons)
-
-	if isRuneMode then
-		NP:ClassPower_UpdateAllRunes(nameplate)
-	else
-		NP:ClassPower_UpdateComboPoints(nameplate)
-	end
-end
-
-function NP:ClassPower_UNIT_COMBO_POINTS()
-	if not COMBO_CLASS[E.myclass] or not NP.Plates then return end
-	for plate in pairs(NP.Plates) do
-		if plate.ClassPower and (plate.isTarget or plate.frameType == 'PLAYER') then
-			NP:Update_ClassPower(plate)
-		end
-	end
-end
-
-function NP:ClassPower_RUNE_POWER_UPDATE(_, runeID)
-	if E.myclass ~= RUNE_CLASS or not NP.Plates then return end
-	local playerDB = NP.db.units.PLAYER and NP.db.units.PLAYER.classpower
-	local targetDB = NP.db.units.TARGET and NP.db.units.TARGET.classpower
-
-	for plate in pairs(NP.Plates) do
-		if plate.ClassPower then
-			if plate.frameType == 'PLAYER' and playerDB and playerDB.enable then
-				NP:ClassPower_UpdateRune(plate, runeID)
-			elseif plate.isTarget and targetDB and targetDB.enable then
-				NP:ClassPower_UpdateRune(plate, runeID)
-			end
-		end
-	end
-end
-
-NP.ClassPower_RUNE_TYPE_UPDATE = NP.ClassPower_RUNE_POWER_UPDATE
-
-function NP:ClassPower_PLAYER_REGEN()
-	if not NP.Plates then return end
-	for plate in pairs(NP.Plates) do
-		if plate.ClassPower and (plate.isTarget or plate.frameType == 'PLAYER') then
-			NP:Update_ClassPower(plate)
-		end
+	if nameplate.unit then
+		NP:RegisterAuraUnitEvents(nameplate, nameplate.unit)
 	end
 end
